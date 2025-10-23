@@ -256,17 +256,19 @@
     return `${fmt2(h)}:${fmt2(m)}:${fmt2(s)}:${fmt2(f)}`;
   }
   
+
+// Parse HH:MM:SS:FF using current FPS
 function parseTcFF(s, fps){
   const m = /^\s*(\d{1,2}):(\d{2}):(\d{2}):(\d{1,3})\s*$/.exec(String(s||""));
   if(!m) return null;
-  const hh=+m[1], mm=+m[2], ss=+m[3], ff=+m[4];
+  const hh = +m[1], mm = +m[2], ss = +m[3], ff = +m[4];
+  if(!(isFinite(hh)&&isFinite(mm)&&isFinite(ss)&&isFinite(ff))) return null;
   const F = Math.max(1, +fps||30);
-  if(ff>=F) return null; // strict FF < fps
-  const totalFrames = (((hh*60 + mm)*60) + ss)*F + ff;
-  return Math.round((1000/F) * totalFrames);
+  const ffClamped = Math.min(Math.max(0, ff), F-1);
+  const totalFrames = (((hh*60 + mm)*60) + ss)*F + ffClamped;
+  return Math.round(totalFrames * (1000/F));
 }
 function msToSrt(ms){
-
     const total=Math.max(0, Math.floor(ms));
     const h=Math.floor(total/3600000), m=Math.floor((total%3600000)/60000), s=Math.floor((total%60000)/1000), msr=total%1000;
     return `${fmt2(h)}:${fmt2(m)}:${fmt2(s)},${String(msr).padStart(3,"0")}`;
@@ -332,8 +334,7 @@ function parseSRT(text){
   $("#btnBack1s").onclick = ()=> player.currentTime = Math.max(0, player.currentTime-1);
   $("#btnFwd1s").onclick = ()=> player.currentTime = Math.min(state.duration, player.currentTime+1);
   $("#selSpeed").onchange = (e)=> player.playbackRate = parseFloat(e.target.value);
-  $("#selFps").onchange = (e)=> { state.fps = parseInt(e.target.value,10)||30; renderRuler(); (window.renderSrtPanel||renderSrtPanel)(); };
-
+  $("#selFps").onchange = (e)=> { state.fps = parseInt(e.target.value,10)||30; renderRuler(); renderSrtPanel(); };
 
   $("#btnPrevFrame").onclick = ()=>{ const step=1/(state.fps||30); player.currentTime=Math.max(0,player.currentTime-step); };
   $("#btnNextFrame").onclick = ()=>{ const step=1/(state.fps||30); player.currentTime=Math.min(state.duration,player.currentTime+step); };
@@ -557,19 +558,94 @@ thumbstrip.addEventListener('dragstart', (e)=> e.preventDefault());
   }
   
 async function detectScenes(){
-  const thr = 0.25;
-  const ff = await ensureFFmpeg();
-  const inName = "input_scene.mp4";
-  try{ ff.FS("stat", inName); }catch{ const buf = await state.videoFile.arrayBuffer(); ff.FS("writeFile", inName, new Uint8Array(buf)); }
-  const logs=[]; ff.setLogger(({type,message})=>{ if(type==="fferr"||type==="ffout") logs.push(message); });
-  await ff.run("-hide_banner","-i",inName,"-vf",`select=gt(scene\,${thr}),showinfo`,"-an","-f","null","-");
-  const rePts=new RegExp("pts_time:\\s*([0-9]+(?:\\.[0-9]+)?)","g");
-  const times=[];
-  for(const line of logs){ let m; while((m=rePts.exec(line))){ const tMs=Math.round(parseFloat(m[1])*1000); if(Number.isFinite(tMs)) times.push(tMs); } }
-  times.sort((a,b)=>a-b);
-  const minGap = Math.round(1000*Math.max(0.25, 8/(state.fps||30)));
-  const cuts=[]; let last=-1e9; for(const t of times){ if(t-last>=minGap){ cuts.push(t); last=t; } }
+  const W = 160, H = 90;
+  const canvas=document.createElement('canvas'); const ctx=canvas.getContext('2d');
+  canvas.width=W; canvas.height=H;
+
+  function hist32(imgData){
+    const bins = new Array(32).fill(0);
+    const d = imgData.data; const n = d.length;
+    for(let i=0;i<n;i+=4){
+      const y = (0.2126*d[i] + 0.7152*d[i+1] + 0.0722*d[i+2]);
+      const b = Math.min(31, (y|0)>>3);
+      bins[b]++;
+    }
+    const total = (imgData.width*imgData.height);
+    for(let i=0;i<32;i++) bins[i] /= total;
+    return bins;
+  }
+  function chiAbs(a,b){
+    let cs=0, sa=0;
+    for(let i=0;i<32;i++){
+      const ai=a[i], bi=b[i]; const d=ai-bi;
+      cs += (d*d)/(ai+bi+1e-6);
+      sa += Math.abs(d);
+    }
+    return 0.5*cs + 0.5*sa;
+  }
+  function median(arr){ const s=arr.slice().sort((x,y)=>x-y); const m=Math.floor(s.length/2); return s.length%2?s[m]:(s[m-1]+s[m])/2; }
+  function mad(arr, med){ const dev=arr.map(x=>Math.abs(x-med)); return median(dev)||0; }
+
+  const useRVFC = typeof player.requestVideoFrameCallback === 'function';
+  const prevPaused = player.paused;
+  const prevRate = player.playbackRate;
+  const prevT = player.currentTime;
+
+  const scores=[], times=[];
+  let prevH=null;
+
+  const processFrame = ()=>{
+    ctx.drawImage(player, 0, 0, W, H);
+    const h = hist32(ctx.getImageData(0,0,W,H));
+    if(prevH){
+      const s = chiAbs(prevH, h);
+      scores.push(s);
+      times.push(player.currentTime*1000|0);
+    }
+    prevH = h;
+  };
+
+  if(useRVFC){
+    player.playbackRate = 2.0;
+    player.muted = true;
+    await new Promise(async (resolve)=>{
+      let done=false;
+      const cb = ()=>{
+        processFrame();
+        if(player.currentTime >= (player.duration - 1/ (state.fps||30) - 0.001)){ done=true; }
+        if(!done) player.requestVideoFrameCallback(cb); else resolve();
+      };
+      player.currentTime = 0;
+      await player.play().catch(()=>{});
+      player.requestVideoFrameCallback(cb);
+    });
+    player.pause();
+  }else{
+    const step = 1/(state.fps||30);
+    const seek = (t)=> new Promise(res=>{ const on=()=>{ player.removeEventListener('seeked',on); res(); }; player.addEventListener('seeked',on,{once:true}); player.currentTime=t; });
+    const wasPaused = player.paused; if(!wasPaused) player.pause();
+    for(let t=0; t<=player.duration; t+=step){
+      await seek(t);
+      processFrame();
+    }
+    if(!wasPaused) player.play();
+  }
+
+  if(scores.length<3){ state.cuts=[]; return; }
+  const med = median(scores);
+  const m = mad(scores, med);
+  const thr = Math.max(med + 6*m, 0.25);
+
+  const cuts=[];
+  for(let i=1;i<scores.length-1;i++){
+    const s=scores[i];
+    if(s>thr && s>scores[i-1] && s>=scores[i+1]) cuts.push(times[i]);
+  }
   state.cuts = cuts;
+
+  player.playbackRate = prevRate;
+  if(!prevPaused){ await player.play().catch(()=>{}); } else { player.pause(); }
+  player.currentTime = prevT;
 }
   function highlightActiveCue(){
     const idx = state.cues.findIndex(c=> state.tMs>=c.start_ms && state.tMs< c.end_ms-2 );
@@ -753,44 +829,6 @@ function srtTimeToMs(s){
   const msPad = String(ms).padEnd(3,"0").slice(0,3);
   return ((+hh*60+ +mm)*60+ +ss)*1000 + (+msPad);
 }
-
-
-function renderSrtPanel(){
-  const p=$("#srtpanel"); if(!p) return; p.innerHTML="";
-  (state.cues||[]).forEach((c)=>{
-    const row=document.createElement('div'); row.className="srtline";
-    row.onclick=(ev)=>{ if(ev.target.closest('input,textarea,[contenteditable]')) return; player.currentTime=(c.start_ms+2)/1000; };
-    const tcd=document.createElement('div'); tcd.className='tc'; tcd.style.display="flex"; tcd.style.flexDirection="column"; tcd.style.gap="6px";
-    const inEl=document.createElement('input'); inEl.value=msToTimecode(c.start_ms, state.fps); inEl.title="Start (HH:MM:SS:FF)"; inEl.style.cssText="width:120px;border-radius:8px;border:1px solid #243246;padding:6px 8px;background:#0b0f14;color:#cfe1f7;font-family:ui-monospace,Menlo,Consolas";
-    const outEl=document.createElement('input'); outEl.value=msToTimecode(c.end_ms, state.fps); outEl.title="End (HH:MM:SS:FF)"; outEl.style.cssText=inEl.style.cssText;
-    function parseTcFF(s, fps){
-      const m = /^\s*(\d{1,2}):(\d{2}):(\d{2}):(\d{1,3})\s*$/.exec(String(s||""));
-      if(!m) return null; const hh=+m[1], mm=+m[2], ss=+m[3], ff=+m[4];
-      const F = Math.max(1, +fps||30); if(ff>=F) return null;
-      const totalFrames = (((hh*60 + mm)*60) + ss)*F + ff;
-      return Math.round((1000/F) * totalFrames);
-    }
-    function commitTC(el,isStart){
-      const ms=parseTcFF(el.value, state.fps);
-      if(ms==null){ el.style.borderColor="#ff7b72"; return; } else { el.style.borderColor="#243246"; }
-      if(isStart){ c.start_ms=Math.min(ms, c.end_ms-1); } else { c.end_ms=Math.max(ms, c.start_ms+1); }
-      inEl.value = msToTimecode(c.start_ms, state.fps);
-      outEl.value = msToTimecode(c.end_ms, state.fps);
-    }
-    inEl.addEventListener("blur",()=>{ commitTC(inEl,true); highlightActiveCue && highlightActiveCue(); });
-    outEl.addEventListener("blur",()=>{ commitTC(outEl,false); highlightActiveCue && highlightActiveCue(); });
-    inEl.addEventListener("keydown",(e)=>{ if(e.key==="Enter"){ e.preventDefault(); inEl.blur(); }});
-    outEl.addEventListener("keydown",(e)=>{ if(e.key==="Enter"){ e.preventDefault(); outEl.blur(); }});
-    tcd.appendChild(inEl); tcd.appendChild(outEl);
-    const txt=document.createElement('div'); txt.className='txt'; txt.contentEditable="true"; txt.spellcheck=false; txt.style.whiteSpace="pre-wrap";
-    txt.textContent=Array.isArray(c.text)?c.text.join("\n"):String(c.text||"");
-    function commitText(){ const lines = txt.textContent.replace(/\r\n|\r/g,"\n").split("\n"); c.text = lines; }
-    txt.addEventListener("blur", commitText);
-    txt.addEventListener("keydown", (e)=>{ if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); txt.blur(); } });
-    row.appendChild(tcd); row.appendChild(txt); p.appendChild(row);
-  });
-}
-window.renderSrtPanel = renderSrtPanel;
 
 })();
 </script>
