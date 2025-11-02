@@ -152,6 +152,10 @@
       <button class="goldrim" id="btnExportTimestamps">Export timestamps</button>
     </div>
     <div style="display:flex; gap:8px; margin-top:0">
+      <button class="goldrim" id="btnExportJSON">Export JSON</button>
+    </div>
+
+    <div style="display:flex; gap:8px; margin-top:0">
       <a class="btn secondary" id="btnDownloadZip" style="display:none" href="#" download>Download zip</a>
     </div>
   </aside>
@@ -314,7 +318,28 @@ function parseSRT(text){
     } else { state.cues=[]; $("#srtpanel").innerHTML=""; }
   };
 
-  player.addEventListener("loadedmetadata", ()=>{
+  
+  function renderSrtPanel(){
+    const box = $("#srtpanel");
+    box.innerHTML = "";
+    if(!Array.isArray(state.cues) || !state.cues.length){
+      box.innerHTML = '<div class="filebox"><small>No SRT loaded</small></div>';
+      return;
+    }
+    // simple list
+    for(let i=0;i<state.cues.length;i++){
+      const c = state.cues[i];
+      const row = document.createElement('div');
+      row.className = "row";
+      row.style.cssText = "padding:6px 8px; border-bottom:1px solid #15202b; cursor:pointer; border-radius:8px";
+      row.innerHTML = '<div><strong>#'+(i+1)+'</strong></div>' +
+        '<div><small>'+msToSrt(c.start_ms)+' → '+msToSrt(c.end_ms)+'</small></div>' +
+        '<div><small>'+ (Array.isArray(c.text) ? c.text.join(" / ") : (c.text||"")) +'</small></div>';
+      row.onclick = ()=>{ try{ player.currentTime = c.start_ms/1000; }catch{} };
+      box.appendChild(row);
+    }
+  }
+player.addEventListener("loadedmetadata", ()=>{
     state.duration = player.duration||0;
     generateThumbnails();
     renderRuler();
@@ -454,10 +479,81 @@ function parseSRT(text){
 
   // Clip list
   function renderClipList(){
+    const listBox = $("#clipList");
+    // ensure drop indicator line exists
+    let dropLine = $("#clipDropLine");
+    if(!dropLine){
+      dropLine = document.createElement('div');
+      dropLine.id = "clipDropLine";
+      dropLine.style.cssText = "position:absolute; left:6px; right:6px; height:0; border-top:2px solid #f2b84b; pointer-events:none; display:none;";
+      const wrap = listBox.parentElement;
+      // make clip list container positioned
+      if(getComputedStyle(listBox).position === "static"){ listBox.style.position = "relative"; }
+      listBox.appendChild(dropLine);
+    }
+
     const box=$("#clipList"); box.innerHTML="";
     for(const c of state.cands){
       const row=document.createElement('div');
       row.style.cssText="padding:8px 10px; border-bottom:1px solid #15202b; cursor:pointer; border-radius:8px;"+(state.selectedId===c.id?" background:#132033;":"");
+      row.dataset.id = c.id;
+      row.onmousedown = (e)=>{
+        e.preventDefault();
+        const container = $("#clipList");
+        // ensure drop line
+        let dropLine = $("#clipDropLine");
+        if(!dropLine){
+          dropLine = document.createElement('div');
+          dropLine.id="clipDropLine";
+          dropLine.style.cssText="position:absolute; left:6px; right:6px; height:0; border-top:2px solid #f2b84b; pointer-events:none; display:none;";
+          if(getComputedStyle(container).position === "static"){ container.style.position="relative"; }
+          container.appendChild(dropLine);
+        }
+        const rows = Array.from(container.children).filter(el => el !== dropLine);
+        const startIdx = state.cands.findIndex(x=>x.id===c.id);
+        // helpers
+        const calcDropIndex = (clientY)=>{
+          const els = rows.map(el=>el.getBoundingClientRect());
+          const mids = els.map(r => r.top + r.height/2);
+          if(!mids.length) return 0;
+          if(clientY < mids[0]) return 0;
+          for(let i=0;i<mids.length-1;i++){ if(clientY >= mids[i] && clientY < mids[i+1]) return i+1; }
+          return mids.length;
+        };
+        const onMove = (ev)=>{
+          const idx = calcDropIndex(ev.clientY);
+          dropLine.style.display="block";
+          if(rows.length===0){ dropLine.style.top="4px"; return; }
+          if(idx >= rows.length){
+            const r = rows[rows.length-1].getBoundingClientRect();
+            const host = container.getBoundingClientRect();
+            dropLine.style.top = (r.bottom - host.top - 8 + container.scrollTop) + "px";
+          } else {
+            const r = rows[idx].getBoundingClientRect();
+            const host = container.getBoundingClientRect();
+            dropLine.style.top = (r.top - host.top - 4 + container.scrollTop) + "px";
+          }
+          row.style.outline="2px solid #f2b84b";
+          row.style.boxShadow="0 0 0 2px rgba(242,184,75,0.25) inset";
+        };
+        const onUp = (ev)=>{
+          window.removeEventListener('mousemove', onMove);
+          window.removeEventListener('mouseup', onUp);
+          dropLine.style.display="none";
+          row.style.outline="none";
+          row.style.boxShadow="none";
+          const idx = calcDropIndex(ev.clientY);
+          const from = startIdx, to = idx;
+          if(Number.isInteger(from) && Number.isInteger(to) && from !== to){
+            const moveItem = (arr, f, t)=>{ const a=arr.slice(); const [x]=a.splice(f,1); const ins = f < t ? Math.max(0, t-1) : t; a.splice(ins,0,x); return a; };
+            state.cands = moveItem(state.cands, from, to);
+            renderClipList(); drawOverlay();
+          }
+        };
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+      };
+
       row.onclick = ()=>{ selectClip(c.id); player.currentTime = c.in_ms/1000; };
       const top=document.createElement('div'); top.style.cssText="display:flex; align-items:center; gap:10px";
       const cb=document.createElement('input'); cb.type='checkbox'; cb.checked=!!c.selected;
@@ -501,7 +597,7 @@ function parseSRT(text){
   $("#btnClearClips").onclick = ()=>{ state.cands=[]; state.selectedId=""; renderClipList(); drawOverlay(); };
   $("#btnAddTimeline").onclick = ()=>{
     const el=$("#jsonl"); let s=el.value||""; s=s.replace(/\r\n|\r/g,"\n").replace(/\\n/g,"\n");
-    const push=(o)=>{ if(Number.isFinite(o.in_ms)&&Number.isFinite(o.out_ms)){ state.cands.push({ id:o.id||("c_"+(state.cands.length+1)), title:o.title||"Untitled", reason:o.reason||"", score:o.score||0, in_ms:+o.in_ms, out_ms:+o.out_ms, selected:true, color:"#2b78ff"}); } };
+    const push=(o)=>{ if(Number.isFinite(o.in_ms)&&Number.isFinite(o.out_ms)){ state.cands.push({ id:o.id||("c_"+(state.cands.length+1)), title:o.title||"Untitled", reason:o.reason||"", score:o.score||0, in_ms:+o.in_ms, out_ms:+o.out_ms, selected:true, color: (typeof o.color==="string" ? o.color : "#2b78ff") }); } };
     try{ const arr=JSON.parse(s); if(Array.isArray(arr)){ arr.forEach(push); renderClipList(); drawOverlay(); return; } }catch{}
     let parts=s.split(/\n+/).map(l=>l.trim()).filter(Boolean);
     if(parts.length===1 && /\}\s*\{/.test(parts[0])) parts = parts[0].replace(/\}\s*\{/g,"}\n{").split(/\n+/);
@@ -703,6 +799,28 @@ async function detectScenes(){
     const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=baseName+"_timestamps.csv"; document.body.appendChild(a); a.click(); a.remove();
   };
 
+  // Export JSON prompt (selected clips in order)
+  $("#btnExportJSON").onclick = ()=>{
+    const selected = state.cands.filter(c=>c.selected);
+    if(!selected.length){ alert("No clips selected."); return; }
+    const payload = selected.map(c => ({
+      id: c.id,
+      title: c.title || "Untitled",
+      reason: c.reason || "",
+      score: Number.isFinite(c.score) ? c.score : 0,
+      in_ms: Math.floor(c.in_ms),
+      out_ms: Math.floor(c.out_ms),
+      selected: true,
+      color: c.color || "#2b78ff",
+    }));
+    const json = JSON.stringify(payload, null, 2);
+    const baseName = (state.videoFile?.name||"video").replace(/\.[^.]+$/,"");
+    const blob = new Blob([json], {type:"application/json"});
+    const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=baseName+"_clips.json"; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 750);
+  };
+
+
   // Export frames (canvas snapshots)
   $("#btnStartFrames").onclick = ()=> exportFrames('start');
   $("#btnMidFrames").onclick = ()=> exportFrames('mid');
@@ -733,12 +851,22 @@ async function detectScenes(){
   async function ensureFFmpeg(){
     if(ffmpeg) return ffmpeg;
     showWork("Loading encoder…");
-    const { createFFmpeg } = await import("https://unpkg.com/@ffmpeg/ffmpeg@0.12.6/dist/umd/index.js");
+    // load UMD bundle to get global FFmpeg
+    await new Promise((resolve, reject)=>{
+      const s = document.createElement('script');
+      s.src = "https://unpkg.com/@ffmpeg/ffmpeg@0.12.6/dist/umd/index.js";
+      s.onload = resolve;
+      s.onerror = ()=>reject(new Error("Failed to load FFmpeg UMD"));
+      document.head.appendChild(s);
+    });
+    if(!window.FFmpeg){ hideWork(); throw new Error("FFmpeg global not found"); }
+    const { createFFmpeg, fetchFile } = window.FFmpeg;
     ffmpeg = createFFmpeg({ log: true, corePath: "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.js" });
     await ffmpeg.load();
     hideWork();
     return ffmpeg;
   }
+
 
   // Export clips via ffmpeg.wasm (separate files zipped)
   $("#btnExportClips").onclick = async ()=>{
