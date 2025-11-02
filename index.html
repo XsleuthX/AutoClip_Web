@@ -339,6 +339,92 @@ function parseSRT(text){
       box.appendChild(row);
     }
   }
+
+  function srtToMs(s){
+    const m = /^\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*$/.exec(s||"");
+    if(!m) return NaN;
+    const h=+m[1], mi=+m[2], se=+m[3], ms=+m[4];
+    return (((h*60+mi)*60)+se)*1000+ms;
+  }
+
+  // Editable SRT panel
+  let editingCueIdx = null;
+  let editingKind = null; // "in" | "out" | "text"
+  function renderSrtPanel(){
+    const box = $("#srtpanel");
+    box.innerHTML = "";
+    if(!Array.isArray(state.cues) || !state.cues.length){
+      box.innerHTML = '<div class="filebox"><small>No SRT loaded</small></div>';
+      return;
+    }
+    for(let i=0;i<state.cues.length;i++){
+      const c = state.cues[i];
+      const row = document.createElement('div');
+      row.className = "row";
+      row.style.cssText = "padding:8px 10px; border-bottom:1px solid #15202b; cursor:pointer; border-radius:8px";
+      row.onclick = (e)=>{ e.stopPropagation(); editingCueIdx=null; editingKind=null; selectClip(state.selectedId); player.currentTime=(c.start_ms||0)/1000; };
+      // Header
+      const head=document.createElement('div'); head.style.cssText="display:flex; align-items:center; gap:8px; justify-content:space-between";
+      const left=document.createElement('div');
+      left.innerHTML = '<strong>#'+(i+1)+'</strong>';
+      const right=document.createElement('div');
+      // Edit buttons
+      const btnIn=document.createElement('button'); btnIn.className="btn small"; btnIn.textContent="Edit In";
+      btnIn.onclick=(e)=>{ e.stopPropagation(); editingCueIdx=i; editingKind="in"; renderSrtPanel(); };
+      const btnOut=document.createElement('button'); btnOut.className="btn small"; btnOut.textContent="Edit Out";
+      btnOut.onclick=(e)=>{ e.stopPropagation(); editingCueIdx=i; editingKind="out"; renderSrtPanel(); };
+      right.append(btnIn, btnOut);
+      head.append(left, right);
+      row.appendChild(head);
+      // Timecodes
+      const tc=document.createElement('div'); tc.style.marginTop="4px";
+      if(editingCueIdx===i && editingKind==="in"){
+        const input=document.createElement('input'); input.value=msToSrt(c.start_ms); input.style.cssText="width:130px; font-family:ui-monospace, Menlo, Consolas, monospace; border-radius:8px; border:1px solid #243246; padding:6px 8px; background:#0b0f14; color:#cfe1f7";
+        input.onkeydown=(ev)=>{
+          if(ev.key==="Enter"){ const v=srtToMs(input.value); if(!Number.isNaN(v)){ c.start_ms=v; if(c.start_ms>c.end_ms) c.start_ms=c.end_ms-1; editingCueIdx=null; editingKind=null; renderSrtPanel(); drawOverlay(); } }
+          if(ev.key==="Escape"){ editingCueIdx=null; editingKind=null; renderSrtPanel(); }
+        };
+        input.onblur=()=>{ editingCueIdx=null; editingKind=null; renderSrtPanel(); };
+        tc.appendChild(input);
+      } else {
+        const sp=document.createElement('span'); sp.style.cssText="font-family:ui-monospace, Menlo, Consolas, monospace";
+        sp.textContent = msToSrt(c.start_ms) + " → " + msToSrt(c.end_ms);
+        tc.appendChild(sp);
+      }
+      row.appendChild(tc);
+      // Edit out if active
+      if(editingCueIdx===i && editingKind==="out"){
+        const tc2=document.createElement('div'); tc2.style.marginTop="4px";
+        const input2=document.createElement('input'); input2.value=msToSrt(c.end_ms); input2.style.cssText="width:130px; font-family:ui-monospace, Menlo, Consolas, monospace; border-radius:8px; border:1px solid #243246; padding:6px 8px; background:#0b0f14; color:#cfe1f7";
+        input2.onkeydown=(ev)=>{
+          if(ev.key==="Enter"){ const v=srtToMs(input2.value); if(!Number.isNaN(v)){ c.end_ms=v; if(c.end_ms<c.start_ms) c.end_ms=c.start_ms+1; editingCueIdx=null; editingKind=null; renderSrtPanel(); drawOverlay(); } }
+          if(ev.key==="Escape"){ editingCueIdx=null; editingKind=null; renderSrtPanel(); }
+        };
+        input2.onblur=()=>{ editingCueIdx=null; editingKind=null; renderSrtPanel(); };
+        tc2.appendChild(input2); row.appendChild(tc2);
+      }
+      // Text
+      const tx=document.createElement('div'); tx.style.marginTop="6px";
+      if(editingCueIdx===i && editingKind==="text"){
+        const ta=document.createElement('textarea');
+        ta.value = Array.isArray(c.text) ? c.text.join("\n") : String(c.text||"");
+        ta.onkeydown=(ev)=>{
+          if(ev.key==="Enter" && (ev.ctrlKey||ev.metaKey)){ c.text = String(ta.value||"").split(/\n/); editingCueIdx=null; editingKind=null; renderSrtPanel(); drawOverlay(); }
+          if(ev.key==="Escape"){ editingCueIdx=null; editingKind=null; renderSrtPanel(); }
+        };
+        ta.onblur=()=>{ c.text = String(ta.value||"").split(/\n/); editingCueIdx=null; editingKind=null; renderSrtPanel(); drawOverlay(); };
+        ta.style.cssText="width:130px; min-height:5.0em; resize:vertical; border-radius:8px; border:1px solid #243246; padding:6px 8px; background:#0b0f14; color:#cfe1f7";
+        tx.appendChild(ta);
+      } else {
+        const small=document.createElement('small');
+        small.textContent = Array.isArray(c.text) ? c.text.join(" / ") : String(c.text||"");
+        small.onclick=(e)=>{ e.stopPropagation(); editingCueIdx=i; editingKind="text"; renderSrtPanel(); };
+        tx.appendChild(small);
+      }
+      row.appendChild(tx);
+      box.appendChild(row);
+    }
+  }
 player.addEventListener("loadedmetadata", ()=>{
     state.duration = player.duration||0;
     generateThumbnails();
@@ -498,6 +584,7 @@ player.addEventListener("loadedmetadata", ()=>{
       row.style.cssText="padding:8px 10px; border-bottom:1px solid #15202b; cursor:pointer; border-radius:8px;"+(state.selectedId===c.id?" background:#132033;":"");
       row.dataset.id = c.id;
       row.onmousedown = (e)=>{
+        if(e.target && (e.target.closest('input,textarea,button,[contenteditable]'))) return;
         e.preventDefault();
         const container = $("#clipList");
         // ensure drop line
@@ -575,7 +662,7 @@ player.addEventListener("loadedmetadata", ()=>{
         const colorRow=document.createElement('div'); colorRow.style.cssText="margin-top:6px; display:flex; align-items:center; gap:8px";
         colorRow.innerHTML="<small>Range color:</small>";
         const col=document.createElement('input'); col.type='color'; col.value=c.color||"#2b78ff";
-        col.onclick=(e)=>e.stopPropagation(); col.oninput=()=>{ c.color=col.value; drawOverlay(); };
+        col.onmousedown=(e)=>e.stopPropagation(); col.onclick=(e)=>e.stopPropagation(); col.oninput=()=>{ c.color=col.value; drawOverlay(); };
         colorRow.appendChild(col); row.appendChild(colorRow);
       }
       box.appendChild(row);
@@ -848,23 +935,39 @@ async function detectScenes(){
 
   // ffmpeg.wasm helpers (loaded on demand)
   let ffmpeg=null;
+  
   async function ensureFFmpeg(){
     if(ffmpeg) return ffmpeg;
     showWork("Loading encoder…");
-    // load UMD bundle to get global FFmpeg
-    await new Promise((resolve, reject)=>{
-      const s = document.createElement('script');
-      s.src = "https://unpkg.com/@ffmpeg/ffmpeg@0.12.6/dist/umd/index.js";
-      s.onload = resolve;
-      s.onerror = ()=>reject(new Error("Failed to load FFmpeg UMD"));
-      document.head.appendChild(s);
-    });
-    if(!window.FFmpeg){ hideWork(); throw new Error("FFmpeg global not found"); }
-    const { createFFmpeg, fetchFile } = window.FFmpeg;
-    ffmpeg = createFFmpeg({ log: true, corePath: "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.js" });
-    await ffmpeg.load();
+    const cdns = [
+      { lib: "https://unpkg.com/@ffmpeg/ffmpeg@0.12.6/dist/umd/index.js",
+        core: "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.js" },
+      { lib: "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.6/dist/umd/index.js",
+        core: "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.js" }
+    ];
+    let lastErr = null;
+    for(const cdn of cdns){
+      try{
+        await new Promise((resolve, reject)=>{
+          const s = document.createElement('script');
+          s.src = cdn.lib; s.crossOrigin="anonymous";
+          s.onload = resolve;
+          s.onerror = ()=>reject(new Error("Failed to load FFmpeg UMD from "+cdn.lib));
+          document.head.appendChild(s);
+        });
+        if(!window.FFmpeg) throw new Error("FFmpeg global not found");
+        const { createFFmpeg } = window.FFmpeg;
+        ffmpeg = createFFmpeg({ log: true, corePath: cdn.core });
+        await ffmpeg.load();
+        hideWork();
+        return ffmpeg;
+      }catch(e){
+        lastErr = e;
+        // try next CDN
+      }
+    }
     hideWork();
-    return ffmpeg;
+    throw lastErr || new Error("Failed to load FFmpeg on all CDNs");
   }
 
 
